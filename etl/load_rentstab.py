@@ -43,6 +43,7 @@ docs/WP1-registry.md.
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -61,14 +62,95 @@ RENTSTAB_LOCAL = DATA_RAW / "rentstab_joined.csv"
 RENTSTAB_V2_LOCAL = DATA_RAW / "rentstab_v2_counts_2024.csv"
 MIRROR_DIR = DATA_EXTERNAL / "dhcr_historical_mirror"
 
+UC_YEAR_COL_RE = re.compile(r"^uc(\d{4})$", re.IGNORECASE)
+
+
+def _melt_unit_counts(df: pd.DataFrame) -> pd.DataFrame:
+    """Reshape a wide rentstab-style frame (one uc20XX column per year) into
+    long (bbl, year, unit_count) rows, one per BBL x year with a non-null
+    count. Column names are matched case-insensitively against `ucNNNN`
+    (nycdb's own naming for both `rentstab` (uc2007..uc2017) and
+    `rentstab_v2` (uc2018..uc2024) -- see module docstring for sources).
+    A BBL column is required; it is normalized (whitespace stripped, a
+    trailing ".0" float-string artifact stripped, left-padded to 10 digits
+    when the result is all-digits and shorter than that) so it matches
+    make_bbl()'s own 10-digit boro+block+lot format. Rows with no derivable
+    bbl (null, blank, or the literal string "nan") are dropped. Duplicate
+    (bbl, year) rows within this frame are collapsed by taking the MAX
+    unit_count, not an arbitrary pick.
+    """
+    if "bbl" not in df.columns:
+        # nycdb's real CSVs use lowercase "bbl"; be tolerant of case drift.
+        bbl_col = next((c for c in df.columns if c.lower() == "bbl"), None)
+        if bbl_col is None:
+            print("[warn] no bbl column found in rentstab-style frame -- skipping unit-count melt.")
+            return pd.DataFrame(columns=["bbl", "year", "unit_count"])
+        df = df.rename(columns={bbl_col: "bbl"})
+
+    year_cols = {c: m.group(1) for c in df.columns if (m := UC_YEAR_COL_RE.match(c))}
+    if not year_cols:
+        print("[warn] no ucNNNN year columns found in rentstab-style frame -- skipping unit-count melt.")
+        return pd.DataFrame(columns=["bbl", "year", "unit_count"])
+
+    bbl_norm = df["bbl"].astype(str).str.strip()
+    # A real nycdb export can carry a BBL as a float-like string (pandas
+    # read it numerically upstream, e.g. "3000010001.0"); strip a trailing
+    # ".0" and left-pad an all-digit result to the canonical 10-digit
+    # boro+block+lot format so it matches make_bbl()'s own output. Don't be
+    # overly clever: a value that still isn't a valid 10-digit BBL after
+    # this cleanup is left as-is -- it just won't match anything downstream.
+    bbl_norm = bbl_norm.str.replace(r"\.0$", "", regex=True)
+    bbl_norm = bbl_norm.where(
+        ~(bbl_norm.str.isdigit() & (bbl_norm.str.len() < 10)),
+        bbl_norm.str.zfill(10),
+    )
+
+    long_rows = []
+    for col, year in year_cols.items():
+        counts = pd.to_numeric(df[col], errors="coerce")
+        sub = pd.DataFrame({"bbl": bbl_norm, "year": int(year), "unit_count": counts})
+        # Drop rows with no derivable bbl (null, blank, or the literal
+        # string "nan" that df["bbl"].astype(str) can produce on some
+        # pandas versions for a null bbl) before this year's rows are
+        # appended, so a bogus BBL never propagates into
+        # rentstab_unit_counts / the registry union.
+        sub = sub[
+            sub["bbl"].notna()
+            & (sub["bbl"].str.strip() != "")
+            & (sub["bbl"].str.lower() != "nan")
+            & sub["unit_count"].notna()
+        ]
+        long_rows.append(sub)
+    if not long_rows:
+        return pd.DataFrame(columns=["bbl", "year", "unit_count"])
+    long_df = pd.concat(long_rows, ignore_index=True)
+    # Dedup (bbl, year) deterministically: if the same BBL/year somehow
+    # appears more than once within this frame (e.g. a duplicate uc-column
+    # or duplicate source row), keep the MAX unit_count rather than an
+    # arbitrary "last row wins" pick.
+    long_df = long_df.groupby(["bbl", "year"], as_index=False)["unit_count"].max()
+    return long_df
+
 
 def load_real_rentstab(conn) -> bool:
-    """Load the real nycdb rentstab table if a human has dropped the file in."""
+    """Load the real nycdb rentstab table(s) if a human has dropped the
+    file(s) in, AND reshape them into a unified long-format
+    `rentstab_unit_counts` (bbl, year, unit_count) table that
+    build_registry.py actually consumes. Without this reshape step, having
+    the raw wide CSVs loaded was a no-op downstream -- this was itself a
+    bug (see docs/WP1-registry.md and the improvement report): the loader
+    could ingest the real files, but build_registry.py never read
+    `rentstab`/`rentstab_v2` at all and hardcoded stab_units_by_year=None
+    unconditionally.
+    """
     loaded_any = False
+    long_frames = []
+
     if RENTSTAB_LOCAL.exists():
         df = pd.read_csv(RENTSTAB_LOCAL, dtype=str, low_memory=False)
         df.to_sql("rentstab", conn, if_exists="replace", index=False)
         print(f"loaded real rentstab: {len(df)} rows from {RENTSTAB_LOCAL}")
+        long_frames.append(_melt_unit_counts(df))
         loaded_any = True
     else:
         print(f"[skip] {RENTSTAB_LOCAL} not present -- rentstab (2007-2017 uc counts) unavailable.")
@@ -77,9 +159,37 @@ def load_real_rentstab(conn) -> bool:
         df = pd.read_csv(RENTSTAB_V2_LOCAL, dtype=str, low_memory=False)
         df.to_sql("rentstab_v2", conn, if_exists="replace", index=False)
         print(f"loaded real rentstab_v2: {len(df)} rows from {RENTSTAB_V2_LOCAL}")
+        long_frames.append(_melt_unit_counts(df))
         loaded_any = True
     else:
         print(f"[skip] {RENTSTAB_V2_LOCAL} not present -- rentstab_v2 (2018-2024 uc counts) unavailable.")
+
+    if long_frames:
+        combined = pd.concat(long_frames, ignore_index=True)
+        # rentstab and rentstab_v2 overlap in no years by construction
+        # (2007-2017 vs 2018-2024), but dedupe defensively on (bbl, year)
+        # in case a future vintage re-covers an earlier year. Take the MAX
+        # unit_count for any (bbl, year) that appears more than once,
+        # rather than an arbitrary "last row wins" pick (drop_duplicates
+        # keep="last" could silently prefer a zero count over a real
+        # nonzero one depending on concat order).
+        combined = combined.groupby(["bbl", "year"], as_index=False)["unit_count"].max()
+        if combined.empty:
+            # Guard the summary print below: min()/max() on an empty frame
+            # yields NaN and int(NaN) raises, which would turn "no usable
+            # rows" into an opaque ValueError traceback.
+            print(
+                "[warn] rentstab files loaded but produced 0 usable (bbl, year) "
+                "unit-count rows -- check that the CSVs carry a bbl column and "
+                "ucNNNN year columns. Leaving rentstab_unit_counts unwritten."
+            )
+        else:
+            combined.to_sql("rentstab_unit_counts", conn, if_exists="replace", index=False)
+            print(
+                f"wrote rentstab_unit_counts: {len(combined)} (bbl, year) rows, "
+                f"{combined['bbl'].nunique()} unique BBLs, years "
+                f"{int(combined['year'].min())}-{int(combined['year'].max())}"
+            )
 
     return loaded_any
 
