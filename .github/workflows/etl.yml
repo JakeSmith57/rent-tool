@@ -1,0 +1,65 @@
+name: Weekly ETL rebuild
+
+on:
+  schedule:
+    # Every Monday 13:00 UTC (~8am Eastern). Cron is in UTC always.
+    - cron: '0 13 * * 1'
+  workflow_dispatch: {}   # lets you also trigger it manually from the Actions tab
+
+jobs:
+  rebuild-registry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch raw source data
+        # GitHub Actions runners have full internet access (unlike the
+        # sandbox this pipeline was originally built in, and unlike some
+        # free-tier hosts), so we can fetch straight from the source each
+        # run instead of committing large, quickly-stale CSVs into the
+        # repo. See docs/GITHUB-SETUP.md for why these files aren't
+        # committed and where each URL comes from.
+        run: |
+          mkdir -p data/raw
+          curl -L "https://taxbillsnyc.s3.amazonaws.com/joined.csv" -o data/raw/rentstab_joined.csv
+          curl -L "https://s3.amazonaws.com/justfix-data/rentstab_counts_from_doffer_2024.csv" -o data/raw/rentstab_v2_counts_2024.csv
+          curl -L "https://data.cityofnewyork.us/resource/wvxf-dwi5.csv?boro=BROOKLYN&\$limit=500000" -o data/raw/hpd_violations_brooklyn.csv
+          ls -lh data/raw/
+
+      - name: Run ETL pipeline
+        run: |
+          python3 etl/load_rentstab.py
+          python3 etl/load_building_issues.py
+          python3 etl/build_registry.py
+
+      - name: Commit updated registry
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/processed/registry.csv
+          git diff --staged --quiet || git commit -m "Auto-update registry ($(date -u +%Y-%m-%d))"
+          git push
+
+# Notes:
+# - The 60-day auto-disable: a scheduled workflow on a repo with zero
+#   commits for 60 days gets automatically disabled by GitHub. The commit
+#   step above counts as repo activity each time it runs, so as long as
+#   this workflow keeps succeeding on schedule, it keeps itself alive.
+# - Cron scheduling on GitHub Actions can drift 5-15+ minutes under load --
+#   fine for a weekly rebuild, don't rely on it for anything time-sensitive.
+# - If you wire in ORS_API_KEY (geo/distance.py's OpenRouteService
+#   backend) into a future workflow step, add it as a repository secret
+#   (Settings -> Secrets and variables -> Actions -> New repository
+#   secret) and reference it as ${{ secrets.ORS_API_KEY }} -- never commit
+#   an API key directly.
+# - This workflow does NOT run geo/build_geo.py (no ORS/OSRM key wired in
+#   here yet, and the public OSRM demo server shouldn't be hit on an
+#   automated schedule) or the Gmail email-alert check (WP3b stays on
+#   Claude's own scheduled task -- see docs/GITHUB-SETUP.md).
