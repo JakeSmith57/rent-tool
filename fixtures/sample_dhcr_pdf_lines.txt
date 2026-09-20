@@ -1,0 +1,36 @@
+# SYNTHETIC FIXTURE -- NOT REAL DHCR DATA.
+#
+# This file is hand-written to mimic the *documented* layout of the RGB/DHCR
+# Brooklyn building-list PDF (grouped by zip, then street name, then building
+# number; co-op/condo, 421-a and J-51 flags; multiple-dwelling class) so that
+# etl/parse_dhcr_pdf.py can be exercised without network access. The building
+# numbers/streets are invented and any resemblance to a real BBL is
+# coincidental. Do not use this file as data -- it exists only for
+# `parse_dhcr_pdf.py --self-test`.
+#
+# Column order per data row (whitespace-separated, flags free text at end):
+#   BLDG_NO  STREET_NAME  STREET_SUFFIX  BORO  BLOCK  LOT  [FLAGS...]
+#
+# A "##ZIP <zip>" line starts a new zip section, matching the PDF's
+# zip-then-street grouping.
+
+##ZIP 11201
+100 MONTAGUE ST 3 258 12 MULTIPLE DWELLING A
+102 MONTAGUE ST 3 258 13 MULTIPLE DWELLING A
+1 PIERREPONT PL 3 262 1 MULTIPLE DWELLING A NON-EVICT COOP/CONDO
+
+##ZIP 11215
+200 7TH AVE 3 1084 45 MULTIPLE DWELLING A
+202 7TH AVE 3 1084 45 MULTIPLE DWELLING A
+# ^ same BBL as the row above, listed a second time under its second street
+#   frontage number -- this is the "same building, two addresses" case the
+#   parser must collapse via BBL, not via address string.
+15 PLAZA ST WEST 3 939 7 MULTIPLE DWELLING A 421-A
+
+##ZIP 11222
+88 FRANKLIN ST 3 2519 30 MULTIPLE DWELLING A J-51
+90 FRANKLIN ST 3 2519 30 MULTIPLE DWELLING A J-51
+# ^ duplicate BBL again, different street-number line, must dedup to 1 row.
+
+##ZIP 99999
+1 UNPARSEABLE ROW WITH NO BORO BLOCK LOT

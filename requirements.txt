@@ -1,0 +1,7 @@
+pandas>=2.0
+numpy>=1.24
+duckdb>=0.10          # optional upgrade target; sqlite3 (stdlib) is the working default
+geopandas>=0.14        # optional, for real polygon work beyond the hand-authored GeoJSON
+shapely>=2.0           # optional, used by geopandas
+requests>=2.31
+pdfplumber>=0.10        # for extracting text from the DHCR PDF (etl/parse_dhcr_pdf.py)
