@@ -28,36 +28,20 @@ primary key -- see ingest/schema.py):
           (the actor's own priceHistory can be incomplete -- see WP0/
           apify_streeteasy.py notes) still accumulate a fuller history
           across repeated runs instead of losing earlier observations.
-          NOTE: this dedup is only as good as the granularity of the
-          incoming "date" field. See normalize.py's normalize_email_alert()
-          PRICE HISTORY note -- that path seeds a DATE (not a full
-          timestamp) precisely so an unchanged price collapses to one row
-          per day here instead of one per hourly run.
         * every other column (rent, amenities, broker_name, etc.) is
           overwritten with the incoming value, since those are
           point-in-time facts about the listing's current state, not
           historical accumulations.
-
-IMPORT STYLE (2026-09-20 fix): switched from package-style imports
-(`from etl.common import ...`) to the flat + sys.path.insert convention
-the rest of the project uses -- see normalize.py's module docstring for
-why the two styles could not coexist.
 """
 from __future__ import annotations
 
 import json
 import sqlite3
-import sys
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import List, Tuple
 
-_HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE))                 # ingest/ -> schema
-sys.path.insert(0, str(_HERE.parent / "etl"))  # etl/    -> common
-
-from common import get_connection  # noqa: E402
-from schema import CREATE_LISTINGS_TABLE_SQL, LISTING_FIELDS, Listing  # noqa: E402
+from etl.common import get_connection
+from ingest.schema import CREATE_LISTINGS_TABLE_SQL, LISTING_FIELDS, Listing
 
 
 def ensure_table(conn: sqlite3.Connection) -> None:

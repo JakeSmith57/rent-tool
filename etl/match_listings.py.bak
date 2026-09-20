@@ -23,37 +23,24 @@ PIPELINE
        set) is scored as unknown/unknown rather than dropped -- a listing
        is still worth seeing even with no signal on it.
     4. Compute nearest-anchor-park distance via geo/build_geo.py's
-       load_parks() + geo/distance.py's nearest_park(). The ranking pass
-       uses the straight_line backend REGARDLESS of geo/distance.py's own
-       ACTIVE_BACKEND -- see MATCH_DISTANCE_BACKEND below for why -- and
-       then the top MATCH_ROUTE_TOP_N are re-routed with the real backend.
+       load_parks() + geo/distance.py's nearest_park(). Uses the
+       straight_line backend by default REGARDLESS of geo/distance.py's
+       own ACTIVE_BACKEND -- see MATCH_DISTANCE_BACKEND below for why.
     5. Compute a single composite match_score (see SCORING below) and
        write every matched listing to data/processed/matched_listings.csv,
        sorted best-first.
 
-WHY STRAIGHT-LINE DISTANCE FOR THE RANKING PASS (not real routing, even
-though geo/distance.py supports it): build_geo.py real-routes a small,
-FIXED set of validation points against 12 parks -- at most a couple
-hundred routed calls. This script runs against every live listing, an
-open-ended and growing number -- real-routing all of them against OSRM's
-rate-limited public demo server (or burning through ORS's 2,000/day
-quota) doesn't scale the same way. Straight-line*circuity is a reasonable
-proxy for ranking/triage (KNOWN LIMITATION: understates distance across
-barriers -- see geo/distance.py's module docstring); MATCH_ROUTE_TOP_N
-below then re-routes just the top N ranked listings with the real backend
+WHY STRAIGHT-LINE DISTANCE HERE (not real routing, even though geo/
+distance.py supports it): build_geo.py real-routes a small, FIXED set of
+validation points against 12 parks -- at most a couple hundred routed
+calls. This script runs against every live listing, an open-ended and
+growing number -- real-routing all of them against OSRM's rate-limited
+public demo server (or burning through ORS's 2,000/day quota) doesn't
+scale the same way. Straight-line*circuity is a reasonable proxy for
+ranking/triage (KNOWN LIMITATION: understates distance across barriers --
+see geo/distance.py's module docstring); MATCH_ROUTE_TOP_N below
+optionally re-routes just the top N ranked listings with the real backend
 for a more accurate final number on the ones that actually matter.
-
-BACKEND SWITCHING (2026-09-20 fix): this module used to set
-`distance_mod.ACTIVE_BACKEND = MATCH_DISTANCE_BACKEND` inside
-score_listing(), on every single call, and never restore it. By the time
-main() reached the "re-route the top N with the real backend" step, the
-module global was still "straight_line" -- so that step silently
-recomputed the exact same straight-line number it already had, and the
-whole MATCH_ROUTE_TOP_N feature was a no-op that merely looked like real
-routing in the output. The real backend is now captured at import time
-(REAL_ROUTING_BACKEND, before anything can mutate it) and the two passes
-run inside an explicit _use_backend() context manager that always
-restores the previous value.
 
 SCORING: match_score (0-100) is a SUBJECTIVE weighted composite of three
 0-3 sub-scores -- stabilization confidence tier, building safety tier, and
@@ -76,7 +63,6 @@ from __future__ import annotations
 
 import csv
 import sys
-from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -91,19 +77,13 @@ from build_geo import load_parks  # noqa: E402
 REGISTRY_CSV = DATA_PROCESSED / "registry.csv"
 MATCHED_OUT_CSV = DATA_PROCESSED / "matched_listings.csv"
 
-# See module docstring's "WHY STRAIGHT-LINE DISTANCE FOR THE RANKING PASS".
+# See module docstring's "WHY STRAIGHT-LINE DISTANCE HERE".
 MATCH_DISTANCE_BACKEND = "straight_line"
-
-# geo/distance.py's configured backend, captured HERE at import time --
-# before any call in this module can mutate the module global. This is the
-# backend the top-N re-route pass uses. See the module docstring's
-# "BACKEND SWITCHING" note for the bug this replaces.
-REAL_ROUTING_BACKEND = distance_mod.ACTIVE_BACKEND
-
 # After ranking every listing with the fast straight-line backend, re-route
-# just the top N with REAL_ROUTING_BACKEND for a trustworthy final number
-# on the listings that actually matter. Set to 0 to skip re-routing
-# entirely.
+# just the top N with the real backend (geo/distance.py's ACTIVE_BACKEND at
+# the time this runs -- whatever that module is currently set to) for a
+# trustworthy final number on the listings that actually matter. Set to 0
+# to skip re-routing entirely.
 MATCH_ROUTE_TOP_N = 10
 
 # Composite match_score sub-weights -- see module docstring's "SCORING".
@@ -114,24 +94,6 @@ STABILIZATION_SUBSCORE = {"high": 3, "moderate": 2, "low": 1, "unknown": 0}
 # signal independent from stabilization_confidence).
 SAFETY_SUBSCORE = {"clean_record": 3, "minimal": 2, "some_issues": 1, "concerning": 0, "unknown": 1}
 MAX_TOTAL_SUBSCORE = 3 + 3 + 3  # stabilization + safety + park, each 0-3
-
-
-@contextmanager
-def _use_backend(name: str):
-    """Temporarily set geo/distance.py's ACTIVE_BACKEND, always restoring
-    the previous value on the way out -- including on an exception.
-
-    distance.py exposes its backend as a module-level global rather than a
-    per-call argument, so switching it is necessarily a mutation; this at
-    least makes the mutation scoped and self-undoing instead of permanent
-    and invisible.
-    """
-    previous = distance_mod.ACTIVE_BACKEND
-    distance_mod.ACTIVE_BACKEND = name
-    try:
-        yield
-    finally:
-        distance_mod.ACTIVE_BACKEND = previous
 
 
 def _park_subscore(walk_minutes: float) -> int:
@@ -165,12 +127,7 @@ def score_listing(listing_row: dict, registry_lookup: dict, parks: dict, conn) -
     """listing_row: a dict shaped like ingest/schema.py's LISTING_FIELDS.
     Returns a scored-listing dict, or None if the listing couldn't be
     geocoded at all (skip, don't crash the whole run over one bad
-    address).
-
-    NOTE: this function no longer touches distance_mod.ACTIVE_BACKEND --
-    the caller sets the backend for the whole pass via _use_backend(). See
-    the module docstring's "BACKEND SWITCHING" note.
-    """
+    address)."""
     geo = geocode_with_cache(conn, listing_row["raw_address"])
     if geo is None:
         return None
@@ -179,6 +136,7 @@ def score_listing(listing_row: dict, registry_lookup: dict, parks: dict, conn) -
     stab_tier = reg.get("stabilization_confidence", "unknown")
     safety_tier = reg.get("building_safety_tier", "unknown")
 
+    distance_mod.ACTIVE_BACKEND = MATCH_DISTANCE_BACKEND
     park_name, park_m = distance_mod.nearest_park((geo["lat"], geo["lon"]), parks)
     walk_min = distance_mod.meters_to_walk_minutes(park_m)
 
@@ -204,29 +162,8 @@ def score_listing(listing_row: dict, registry_lookup: dict, parks: dict, conn) -
         "building_safety_tier_reason": reg.get("building_safety_tier_reason"),
         "nearest_park": park_name,
         "nearest_park_walk_min": round(walk_min, 1),
-        "park_distance_backend": distance_mod.ACTIVE_BACKEND,
         "match_score": match_score,
     }
-
-
-def _rescore_park(result: dict, parks: dict) -> None:
-    """Recompute just the park fields (and the park component of
-    match_score) for one already-scored listing, using whatever backend is
-    currently active. Mutates `result` in place.
-    """
-    name, m = distance_mod.nearest_park((result["latitude"], result["longitude"]), parks)
-    walk_min = distance_mod.meters_to_walk_minutes(m)
-    old_park_sub = _park_subscore(result["nearest_park_walk_min"])
-    new_park_sub = _park_subscore(walk_min)
-
-    result["nearest_park"] = name
-    result["nearest_park_walk_min"] = round(walk_min, 1)
-    result["park_distance_backend"] = distance_mod.ACTIVE_BACKEND
-    # Keep match_score consistent with the distance it's now reporting --
-    # otherwise a re-routed listing carries a score computed from a
-    # distance no longer shown anywhere in the output.
-    delta = (new_park_sub - old_park_sub) / MAX_TOTAL_SUBSCORE * 100
-    result["match_score"] = round(result["match_score"] + delta, 1)
 
 
 def main():
@@ -248,61 +185,31 @@ def main():
     registry_lookup = load_registry_lookup()
     print("Loading parks for distance scoring...", flush=True)
     parks = load_parks()
-    if not parks:
-        print(
-            "ERROR: load_parks() returned no anchor parks -- every listing "
-            "would score nearest_park=None at infinite distance. Check "
-            "geo/parks.geojson and geo/load_parks.py's ANCHOR_PARKS.",
-            file=sys.stderr,
-        )
-        conn.close()
-        sys.exit(1)
 
-    print(
-        f"Scoring {len(rows)} listing(s) with the "
-        f"{MATCH_DISTANCE_BACKEND!r} backend...",
-        flush=True,
-    )
+    print(f"Scoring {len(rows)} listing(s)...", flush=True)
     scored = []
     skipped = 0
-    with _use_backend(MATCH_DISTANCE_BACKEND):
-        for i, row in enumerate(rows, start=1):
-            listing_row = dict(zip(cols, row))
-            print(f"[{i}/{len(rows)}] {listing_row.get('raw_address')}...", end="", flush=True)
-            result = score_listing(listing_row, registry_lookup, parks, conn)
-            if result is None:
-                skipped += 1
-                print(" SKIPPED (could not geocode)", flush=True)
-                continue
-            scored.append(result)
-            print(f" score={result['match_score']}", flush=True)
+    for i, row in enumerate(rows, start=1):
+        listing_row = dict(zip(cols, row))
+        print(f"[{i}/{len(rows)}] {listing_row.get('raw_address')}...", end="", flush=True)
+        result = score_listing(listing_row, registry_lookup, parks, conn)
+        if result is None:
+            skipped += 1
+            print(" SKIPPED (could not geocode)", flush=True)
+            continue
+        scored.append(result)
+        print(f" score={result['match_score']}", flush=True)
 
     conn.close()
     scored.sort(key=lambda r: r["match_score"], reverse=True)
 
     if MATCH_ROUTE_TOP_N > 0 and scored:
         n = min(MATCH_ROUTE_TOP_N, len(scored))
-        if REAL_ROUTING_BACKEND == MATCH_DISTANCE_BACKEND:
-            print(
-                f"Skipping the top-{n} re-route: geo/distance.py's "
-                f"ACTIVE_BACKEND is already {REAL_ROUTING_BACKEND!r}, the same "
-                "backend the ranking pass used, so re-routing would recompute "
-                "identical numbers. Set ACTIVE_BACKEND to 'routing_api' or "
-                "'ors' in geo/distance.py for real walking distances here.",
-                flush=True,
-            )
-        else:
-            print(
-                f"Re-routing top {n} with the real {REAL_ROUTING_BACKEND!r} "
-                "backend...",
-                flush=True,
-            )
-            with _use_backend(REAL_ROUTING_BACKEND):
-                for r in scored[:n]:
-                    _rescore_park(r, parks)
-            # Re-routing can change a listing's park sub-score, so the
-            # top-N ordering is no longer guaranteed. Re-sort.
-            scored.sort(key=lambda r: r["match_score"], reverse=True)
+        print(f"Re-routing top {n} with the real routing backend...", flush=True)
+        for r in scored[:n]:
+            name, m = distance_mod.nearest_park((r["latitude"], r["longitude"]), parks)
+            r["nearest_park"] = name
+            r["nearest_park_walk_min"] = round(distance_mod.meters_to_walk_minutes(m), 1)
 
     if scored:
         with open(MATCHED_OUT_CSV, "w", newline="") as f:
@@ -319,8 +226,7 @@ def main():
                 f"  [{r['match_score']}] {r['raw_address']} -- ${r['rent']} / "
                 f"{r['beds']}bd -- stab={r['stabilization_confidence']} "
                 f"safety={r['building_safety_tier']} -- {r['nearest_park']} "
-                f"({r['nearest_park_walk_min']} min walk, "
-                f"{r['park_distance_backend']})"
+                f"({r['nearest_park_walk_min']} min walk)"
             )
     else:
         print(f"\nNo listings could be geocoded/scored ({skipped} skipped).")

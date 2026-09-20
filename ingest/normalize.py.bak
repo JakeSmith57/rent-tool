@@ -59,33 +59,17 @@ agentName/Email/Phone/PhoneAlt/ProfileUrl, contacts, heroPhotoUrl,
 thumbnailUrl, photos, floorplans, videoUrls, tour3dUrl, areaId,
 openHouses, comparableListings, buildingUrl, buildingId,
 managementCompanyProfileUrl, isLandLease.
-
-IMPORT STYLE (2026-09-20 fix): this module previously used package-style
-imports (`from etl.common import ...`, `from ingest.schema import ...`)
-while every other module in the project used flat imports plus a
-sys.path.insert. The two styles need different working directories and
-different sys.path states, so anything importing across that boundary
-could not satisfy both at once. The whole project now uses the flat +
-sys.path.insert convention (the majority style, and the one that matches
-how these scripts are actually invoked: `python3 ingest/run_ingest.py`
-from the repo root).
 """
 from __future__ import annotations
 
 import json
-import sys
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import hashlib
 
-_HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE))                 # ingest/  -> schema
-sys.path.insert(0, str(_HERE.parent / "etl"))  # etl/     -> common
-
-from common import STARTING_ZIPS, TARGET_NEIGHBORHOODS  # noqa: E402
-from schema import Listing  # noqa: E402
+from etl.common import STARTING_ZIPS, TARGET_NEIGHBORHOODS
+from ingest.schema import Listing
 
 SOURCE_NAME = "apify_streeteasy"
 EMAIL_ALERT_SOURCE_NAME = "streeteasy_email_alert"
@@ -100,15 +84,6 @@ TARGET_BEDS = {1, 2}
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _utc_today() -> str:
-    """Date-only (YYYY-MM-DD) stamp for price_history observations.
-
-    See normalize_email_alert()'s PRICE HISTORY note for why this is a
-    date and not a full timestamp.
-    """
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def _to_float(value: Any) -> Optional[float]:
@@ -126,29 +101,13 @@ def _to_bool_int(value: Any) -> Optional[int]:
     return 1 if bool(value) else 0
 
 
-def _beds_in_target(raw_beds: Any) -> Optional[float]:
-    """Coerce a raw beds value and check it against TARGET_BEDS.
-
-    Returns the float bed count if it passes the filter, else None.
-
-    Uses _to_float rather than a bare int() so a malformed value ("1.5",
-    "one", "") returns None -- i.e. that ONE card is dropped -- instead of
-    raising ValueError and killing the whole batch. normalize_one() always
-    did this correctly; normalize_email_alert() used a bare int() and so
-    could crash an entire scheduled run on a single bad card. Fractional
-    bed counts ("1.5 bed") truncate toward zero the same way the old
-    int() did, so 1.5 -> 1 still passes: the coercion is what changed,
-    not the filter's semantics.
-    """
-    beds = _to_float(raw_beds)
-    if beds is None:
-        return None
-    try:
-        if int(beds) not in TARGET_BEDS:
-            return None
-    except (ValueError, OverflowError):  # inf / nan
-        return None
-    return beds
+def _merge_amenities(raw: Dict[str, Any]) -> List[str]:
+    unit_amenities = raw.get("amenities") or []
+    building_amenities = raw.get("buildingAmenities") or []
+    # dict.fromkeys instead of set() to keep a stable, dedup'd order --
+    # matters only for readability/diffing, not correctness.
+    merged = list(dict.fromkeys([*unit_amenities, *building_amenities]))
+    return merged
 
 
 def normalize_one(raw: Dict[str, Any]) -> Optional[Listing]:
@@ -159,8 +118,9 @@ def normalize_one(raw: Dict[str, Any]) -> Optional[Listing]:
     records so a caller can just `filter(None, ...)` over a raw batch --
     see normalize_batch() below, which also reports counts.
     """
-    beds = _beds_in_target(raw.get("bedrooms"))
-    if beds is None:
+    beds_raw = raw.get("bedrooms")
+    beds = _to_float(beds_raw)
+    if beds is None or int(beds) not in TARGET_BEDS:
         return None
 
     raw_zip = str(raw.get("zipCode") or "").strip()
@@ -194,15 +154,6 @@ def normalize_one(raw: Dict[str, Any]) -> Optional[Listing]:
         longitude=_to_float(raw.get("longitude")),
         raw_zip=raw_zip,
     )
-
-
-def _merge_amenities(raw: Dict[str, Any]) -> List[str]:
-    unit_amenities = raw.get("amenities") or []
-    building_amenities = raw.get("buildingAmenities") or []
-    # dict.fromkeys instead of set() to keep a stable, dedup'd order --
-    # matters only for readability/diffing, not correctness.
-    merged = list(dict.fromkeys([*unit_amenities, *building_amenities]))
-    return merged
 
 
 def _target_neighborhood_lower() -> set:
@@ -257,20 +208,9 @@ def normalize_email_alert(raw: Dict[str, Any], source: str = "streeteasy") -> Op
     emails is correctly treated as two distinct rows (they're two
     different sites' listing records, even if they end up being the same
     physical unit) rather than colliding into one upsert.
-
-    PRICE HISTORY (2026-09-20 fix): the seeded observation is stamped with
-    a DATE (YYYY-MM-DD), not a full UTC timestamp. Alert emails carry no
-    price history of their own, so this module seeds a single "we saw this
-    price" observation -- and store.py's merge dedupes on the (date, price)
-    pair. With a full timestamp, the hourly scheduled task minted a new
-    unique key every single run, so an unchanged price accumulated one
-    row per hour forever (~720 rows/listing/month). Truncating to the day
-    means an unchanged price collapses to one row per day, and a genuine
-    same-day price change still records separately because the price half
-    of the key differs.
     """
-    beds = _beds_in_target(raw.get("beds"))
-    if beds is None:
+    beds = raw.get("beds")
+    if beds is None or int(beds) not in TARGET_BEDS:
         return None
 
     neighborhood = (raw.get("neighborhood") or "").strip()
@@ -290,8 +230,7 @@ def normalize_email_alert(raw: Dict[str, Any], source: str = "streeteasy") -> Op
     source_name = EMAIL_ALERT_SOURCE_NAME if source == "streeteasy" else f"{source}_email_alert"
 
     now = _utc_now_iso()
-    price = _to_float(raw.get("price"))
-    price_history = [{"date": _utc_today(), "price": price}] if price is not None else []
+    price_history = [{"date": now, "price": raw.get("price")}] if raw.get("price") is not None else []
 
     return Listing(
         source=source_name,
@@ -299,9 +238,9 @@ def normalize_email_alert(raw: Dict[str, Any], source: str = "streeteasy") -> Op
         url=raw.get("url"),
         raw_address=address,
         unit=None,  # unit is embedded in raw_address for this source (e.g. "216 7th St. #1")
-        beds=beds,
+        beds=float(beds),
         baths=_to_float(raw.get("baths")),
-        rent=price,
+        rent=_to_float(raw.get("price")),
         sqft=_to_float(raw.get("sqft")),
         no_fee=_to_bool_int(raw.get("no_fee")),
         broker_name=None,
@@ -321,35 +260,17 @@ def normalize_email_alert_batch(
     """Same shape as normalize_batch(), for an email-alert source. `source`
     is passed straight through to normalize_email_alert() for each card --
     see its docstring for what it controls (Listing.source value and the
-    id-hash's backward-compatibility behavior).
-
-    A card that raises unexpectedly is logged and skipped rather than
-    killing the batch: this runs inside an hourly scheduled task where one
-    malformed card in a template-changed email should cost one listing,
-    not the whole run.
-    """
+    id-hash's backward-compatibility behavior)."""
     raw_count = len(raw_cards)
     kept: List[Listing] = []
-    errored = 0
     for raw in raw_cards:
-        try:
-            listing = normalize_email_alert(raw, source=source)
-        except Exception as exc:  # noqa: BLE001 - one bad card must not kill the run
-            errored += 1
-            print(
-                f"[warn] normalize_email_alert[{source}] raised on a card "
-                f"({exc.__class__.__name__}: {exc}); skipping it. Raw card: {raw!r}",
-                file=sys.stderr,
-            )
-            continue
+        listing = normalize_email_alert(raw, source=source)
         if listing is not None:
             kept.append(listing)
     dropped_count = raw_count - len(kept)
     print(
         f"normalize_email_alert[{source}]: {raw_count} raw cards -> {len(kept)} passed "
-        f"bed/neighborhood filter ({dropped_count} dropped"
-        + (f", {errored} of them due to errors" if errored else "")
-        + ")"
+        f"bed/neighborhood filter ({dropped_count} dropped)"
     )
     return kept, raw_count, dropped_count
 
@@ -361,25 +282,13 @@ def normalize_batch(raw_items: List[Dict[str, Any]]) -> Tuple[List[Listing], int
     """
     raw_count = len(raw_items)
     kept: List[Listing] = []
-    errored = 0
     for raw in raw_items:
-        try:
-            listing = normalize_one(raw)
-        except Exception as exc:  # noqa: BLE001 - same reasoning as the email-alert batch
-            errored += 1
-            print(
-                f"[warn] normalize_one raised on a record "
-                f"({exc.__class__.__name__}: {exc}); skipping it.",
-                file=sys.stderr,
-            )
-            continue
+        listing = normalize_one(raw)
         if listing is not None:
             kept.append(listing)
     dropped_count = raw_count - len(kept)
     print(
         f"normalize: {raw_count} raw -> {len(kept)} passed bed/zip filter "
-        f"({dropped_count} dropped: not 1-2BR, not in target zips, or malformed"
-        + (f"; {errored} of them due to errors" if errored else "")
-        + ")"
+        f"({dropped_count} dropped: not 1-2BR, not in target zips, or malformed)"
     )
     return kept, raw_count, dropped_count

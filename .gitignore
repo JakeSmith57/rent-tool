@@ -22,3 +22,8 @@ geo/build_geo_output.json
 geo/parks_raw.json
 geo/build_geo_output.json
 geo/parks_raw.json
+
+# Exception: derived from the manually-downloaded DHCR PDF, which the
+# Actions workflow cannot fetch itself -- so this one parsed output is
+# committed rather than regenerated. All other data/ CSVs stay ignored.
+!data/interim/dhcr_brooklyn_parsed.csv

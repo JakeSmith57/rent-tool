@@ -52,11 +52,6 @@ HOW TO ADD A NEW SOURCE (mirrors exactly how StreetEasy's WP3b was built)
        state/email-alert-state.json) for how a session should loop over
        ALL registered sources on each run, not just StreetEasy.
 
-IMPORT STYLE (2026-09-20 fix): switched from package-style imports
-(`from ingest.parse_streeteasy_email import ...`) to the flat +
-sys.path.insert convention the rest of the project uses -- see
-normalize.py's module docstring for why the two styles could not coexist.
-
 Public interface:
     SOURCE_PARSERS       -- {source_key: extract_listing_cards_fn}
     GMAIL_SEARCH_QUERIES  -- {source_key: gmail search query string}
@@ -64,14 +59,9 @@ Public interface:
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-_HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE))  # ingest/ -> parse_streeteasy_email
-
-from parse_streeteasy_email import extract_listing_cards as _parse_streeteasy  # noqa: E402
+from ingest.parse_streeteasy_email import extract_listing_cards as _parse_streeteasy
 
 # Each entry: source_key -> a function(html: str) -> List[Dict[str, Any]]
 # matching parse_streeteasy_email.extract_listing_cards()'s return shape.

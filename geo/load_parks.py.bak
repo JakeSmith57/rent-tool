@@ -45,15 +45,6 @@ this sandbox's own egress is locked to package registries only):
     python3 geo/load_parks.py
   which will attempt the live fetch itself first and fall back to
   --from-file's cached copy, then to placeholder points, in that order.
-
-NEIGHBORHOOD COVERAGE (2026-09-20 fix): Boerum Hill was added to
-etl/common.py's TARGET_NEIGHBORHOODS on 2026-09-19, but ANCHOR_PARKS was
-never updated to match -- so a Boerum Hill listing's "nearest park" was
-always a park in a DIFFERENT neighborhood (nearest anchor was Cobble Hill
-Park at ~14.5 min), structurally capping its park sub-score at 2 no matter
-how close it actually sat to green space. Dean Playground (Boerum Hill's
-own DPR property) is now an anchor. If you add another target
-neighborhood later, add an anchor park for it HERE at the same time.
 """
 import argparse
 import json
@@ -135,22 +126,6 @@ ANCHOR_PARKS = {
             "a live dataset query -- flagged for manual confirmation."
         ),
     },
-    "Dean Playground": {
-        "expect_in_dataset": True,
-        "note": (
-            "ADDED 2026-09-20 to give Boerum Hill an anchor of its own -- "
-            "Boerum Hill joined TARGET_NEIGHBORHOODS on 2026-09-19 but no "
-            "anchor park was added with it, so every Boerum Hill listing "
-            "was scored against parks in other neighborhoods (nearest was "
-            "Cobble Hill Park at ~14.5 min, capping its park sub-score at "
-            "2). NYC DPR property on Bergen St between Hoyt and Bond, "
-            "Boerum Hill. LOW CONFIDENCE on the exact name and the "
-            "placeholder coordinates below: VERIFY both against a real "
-            "enfh-gkve fetch (check_anchor_coverage() will report it as "
-            "'MISSING -- unexpected' if the dataset spells it differently) "
-            "and add the real spelling to ANCHOR_ALIASES if so."
-        ),
-    },
     "Carroll Park": {
         "expect_in_dataset": True,
         "note": "NYC DPR property, Carroll Gardens.",
@@ -180,10 +155,6 @@ ANCHOR_PARKS = {
 ANCHOR_ALIASES = {
     "Mount Prospect Park": ["Mt. Prospect Park", "Mt Prospect Park"],
     "McGolrick Park": ["Msgr. McGolrick Park", "Msgr McGolrick Park", "Monsignor McGolrick Park"],
-    # Unverified guesses at how the real dataset may spell the Boerum Hill
-    # anchor -- see its ANCHOR_PARKS note. Prune whichever don't match
-    # once you've seen a real fetch.
-    "Dean Playground": ["Dean St Playground", "Dean Street Playground"],
 }
 
 
@@ -251,7 +222,7 @@ def load_neighborhood_bbox(path=NEIGHBORHOODS_PATH, buffer_deg=0.0145):
 def fetch_from_socrata(bbox, limit=5000, timeout=20):
     """Attempt a live Socrata fetch, filtered to Brooklyn ('B', confirmed
     live -- see module docstring) and a bounding box roughly covering the
-    9 neighborhoods + 1 mile buffer.
+    8 neighborhoods + 1 mile buffer.
     Returns a list of row dicts, or raises on failure (caller decides
     fallback behavior)."""
     minlon, minlat, maxlon, maxlat = bbox
@@ -330,10 +301,6 @@ PLACEHOLDER_PARK_POINTS = {
     ],
     "Mount Prospect Park": [(-73.9670, 40.6745)],
     "Washington Park": [(-73.9660, 40.6930)],  # low confidence, see note
-    # Boerum Hill's anchor, added 2026-09-20 -- see its ANCHOR_PARKS note.
-    # LOW CONFIDENCE placeholder coordinate (Bergen St between Hoyt and
-    # Bond); replace with real polygon geometry from a live fetch.
-    "Dean Playground": [(-73.9860, 40.6817)],
     "Carroll Park": [(-73.9950, 40.6800)],
     "Cobble Hill Park": [(-73.9945, 40.6873)],
     "Brooklyn Bridge Park": [

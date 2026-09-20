@@ -1,0 +1,203 @@
+{
+  "McCarren Park": {
+    "points": [
+      [
+        40.7211,
+        -73.9515
+      ]
+    ],
+    "centroid": [
+      40.7211,
+      -73.9515
+    ],
+    "sample_point_count": 1
+  },
+  "WNYC Transmitter Park": {
+    "points": [
+      [
+        40.73,
+        -73.9581
+      ]
+    ],
+    "centroid": [
+      40.73,
+      -73.9581
+    ],
+    "sample_point_count": 1
+  },
+  "McGolrick Park": {
+    "points": [
+      [
+        40.7237,
+        -73.9391
+      ]
+    ],
+    "centroid": [
+      40.7237,
+      -73.9391
+    ],
+    "sample_point_count": 1
+  },
+  "Domino Park": {
+    "points": [
+      [
+        40.7115,
+        -73.964
+      ]
+    ],
+    "centroid": [
+      40.7115,
+      -73.964
+    ],
+    "sample_point_count": 1
+  },
+  "Marsha P. Johnson State Park": {
+    "points": [
+      [
+        40.7212,
+        -73.9636
+      ]
+    ],
+    "centroid": [
+      40.7212,
+      -73.9636
+    ],
+    "sample_point_count": 1
+  },
+  "Fort Greene Park": {
+    "points": [
+      [
+        40.6903,
+        -73.9737
+      ]
+    ],
+    "centroid": [
+      40.6903,
+      -73.9737
+    ],
+    "sample_point_count": 1
+  },
+  "Prospect Park": {
+    "points": [
+      [
+        40.6743,
+        -73.9701
+      ],
+      [
+        40.665,
+        -73.974
+      ],
+      [
+        40.6605,
+        -73.9635
+      ],
+      [
+        40.656,
+        -73.9605
+      ],
+      [
+        40.652,
+        -73.9645
+      ],
+      [
+        40.666,
+        -73.959
+      ],
+      [
+        40.6745,
+        -73.966
+      ]
+    ],
+    "centroid": [
+      40.664043,
+      -73.965371
+    ],
+    "sample_point_count": 7
+  },
+  "Mount Prospect Park": {
+    "points": [
+      [
+        40.6745,
+        -73.967
+      ]
+    ],
+    "centroid": [
+      40.6745,
+      -73.967
+    ],
+    "sample_point_count": 1
+  },
+  "Washington Park": {
+    "points": [
+      [
+        40.693,
+        -73.966
+      ]
+    ],
+    "centroid": [
+      40.693,
+      -73.966
+    ],
+    "sample_point_count": 1
+  },
+  "Dean Playground": {
+    "points": [
+      [
+        40.6817,
+        -73.986
+      ]
+    ],
+    "centroid": [
+      40.6817,
+      -73.986
+    ],
+    "sample_point_count": 1
+  },
+  "Carroll Park": {
+    "points": [
+      [
+        40.68,
+        -73.995
+      ]
+    ],
+    "centroid": [
+      40.68,
+      -73.995
+    ],
+    "sample_point_count": 1
+  },
+  "Cobble Hill Park": {
+    "points": [
+      [
+        40.6873,
+        -73.9945
+      ]
+    ],
+    "centroid": [
+      40.6873,
+      -73.9945
+    ],
+    "sample_point_count": 1
+  },
+  "Brooklyn Bridge Park": {
+    "points": [
+      [
+        40.7025,
+        -73.9968
+      ],
+      [
+        40.696,
+        -73.9945
+      ],
+      [
+        40.69,
+        -73.999
+      ]
+    ],
+    "centroid": [
+      40.696167,
+      -73.996767
+    ],
+    "sample_point_count": 3
+  }
+}
