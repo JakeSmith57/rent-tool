@@ -160,9 +160,18 @@ def _target_neighborhood_lower() -> set:
     return {n.lower() for n in TARGET_NEIGHBORHOODS}
 
 
-def normalize_email_alert(raw: Dict[str, Any]) -> Optional[Listing]:
-    """Map one raw card from ingest/parse_streeteasy_email.py's
-    extract_listing_cards() into a Listing, applying WP3b's hard filters.
+def normalize_email_alert(raw: Dict[str, Any], source: str = "streeteasy") -> Optional[Listing]:
+    """Map one raw card from an email-alert parser (see
+    ingest/email_alert_sources.py's registry -- ingest/parse_streeteasy_
+    email.py's extract_listing_cards() is the one real implementation so
+    far) into a Listing, applying WP3b's hard filters.
+
+    `source` identifies WHICH site's alert email this card came from (e.g.
+    "streeteasy", or a future "zumper"/"renthop" once a real parser exists
+    for that site -- see email_alert_sources.py's docstring for how to add
+    one). Every source normalizes to the same Listing shape here, since
+    every site's alert email carries the same basic fields (address,
+    price, beds/baths, neighborhood-or-similar, a link).
 
     HARD FILTERS (mirrors normalize_one()'s intent, different fields since
     this source has no zip -- see etl/common.py's TARGET_NEIGHBORHOODS
@@ -173,9 +182,12 @@ def normalize_email_alert(raw: Dict[str, Any]) -> Optional[Listing]:
            search, but the "Similar listings" section in the same email
            can include off-target neighborhoods/bed counts (confirmed in
            the real sample -- a 3BR in East Williamsburg turned up there),
-           so this filter is still load-bearing, not a formality.
+           so this filter is still load-bearing, not a formality. Any new
+           source added later should be checked for the same
+           "similar/nearby" leakage before assuming this filter alone is
+           enough.
 
-    SOURCE_LISTING_ID: alert emails don't expose StreetEasy's own numeric
+    SOURCE_LISTING_ID: alert emails don't expose the site's own numeric
     listing id anywhere in the visible card (only a one-time click-tracking
     redirect URL, which isn't a stable identifier and isn't worth resolving
     via a live HTTP follow just to mint an id). Instead we hash
@@ -186,6 +198,16 @@ def normalize_email_alert(raw: Dict[str, Any]) -> Optional[Listing]:
     collide; accepted as a rare, low-stakes edge case for a personal-use
     tool (a re-listed identical address is far more likely than a genuine
     collision).
+    IMPORTANT (backward compatibility): for source="streeteasy" (the
+    default, and the only source that has ever run against real data), the
+    id hash is (address, neighborhood) ONLY -- exactly as it always has
+    been -- so ids already stored in data/streeteasy-matches.json keep
+    matching on future runs and price-history accumulation isn't reset.
+    For any OTHER source, the source name is folded into the hash too, so
+    the same address+neighborhood seen via two different sites' alert
+    emails is correctly treated as two distinct rows (they're two
+    different sites' listing records, even if they end up being the same
+    physical unit) rather than colliding into one upsert.
     """
     beds = raw.get("beds")
     if beds is None or int(beds) not in TARGET_BEDS:
@@ -199,14 +221,19 @@ def normalize_email_alert(raw: Dict[str, Any]) -> Optional[Listing]:
     if not address:
         return None
 
-    id_source = f"{address.lower()}|{neighborhood.lower()}"
+    if source == "streeteasy":
+        id_source = f"{address.lower()}|{neighborhood.lower()}"
+    else:
+        id_source = f"{source.lower()}|{address.lower()}|{neighborhood.lower()}"
     source_listing_id = hashlib.sha1(id_source.encode("utf-8")).hexdigest()[:16]
+
+    source_name = EMAIL_ALERT_SOURCE_NAME if source == "streeteasy" else f"{source}_email_alert"
 
     now = _utc_now_iso()
     price_history = [{"date": now, "price": raw.get("price")}] if raw.get("price") is not None else []
 
     return Listing(
-        source=EMAIL_ALERT_SOURCE_NAME,
+        source=source_name,
         source_listing_id=source_listing_id,
         url=raw.get("url"),
         raw_address=address,
@@ -227,17 +254,22 @@ def normalize_email_alert(raw: Dict[str, Any]) -> Optional[Listing]:
     )
 
 
-def normalize_email_alert_batch(raw_cards: List[Dict[str, Any]]) -> Tuple[List[Listing], int, int]:
-    """Same shape as normalize_batch(), for the email-alert source."""
+def normalize_email_alert_batch(
+    raw_cards: List[Dict[str, Any]], source: str = "streeteasy"
+) -> Tuple[List[Listing], int, int]:
+    """Same shape as normalize_batch(), for an email-alert source. `source`
+    is passed straight through to normalize_email_alert() for each card --
+    see its docstring for what it controls (Listing.source value and the
+    id-hash's backward-compatibility behavior)."""
     raw_count = len(raw_cards)
     kept: List[Listing] = []
     for raw in raw_cards:
-        listing = normalize_email_alert(raw)
+        listing = normalize_email_alert(raw, source=source)
         if listing is not None:
             kept.append(listing)
     dropped_count = raw_count - len(kept)
     print(
-        f"normalize_email_alert: {raw_count} raw cards -> {len(kept)} passed "
+        f"normalize_email_alert[{source}]: {raw_count} raw cards -> {len(kept)} passed "
         f"bed/neighborhood filter ({dropped_count} dropped)"
     )
     return kept, raw_count, dropped_count
