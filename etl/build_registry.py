@@ -97,10 +97,15 @@ def load_dhcr_current(conn) -> pd.DataFrame:
     """Load the current-cycle DHCR building list CSV, with a dedup proof."""
     if not DHCR_PARSED_CSV.exists():
         print(f"[warn] {DHCR_PARSED_CSV} missing -- proceeding with an empty DHCR-current table.")
+        # NOTE: "address" and "on_dhcr_list" are derived columns, added at the
+        # end of the happy path below -- but main() selects them off this frame
+        # unconditionally, so the empty placeholder MUST declare them too or the
+        # missing-CSV path dies with KeyError instead of degrading gracefully.
         return pd.DataFrame(
             columns=[
                 "bbl", "zip", "bldg_no", "street_name", "street_suffix",
                 "multiple_dwelling_class", "is_condo_coop", "abatement_type",
+                "address", "on_dhcr_list",
             ]
         )
     df = pd.read_csv(DHCR_PARSED_CSV, dtype=str)
