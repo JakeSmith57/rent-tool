@@ -147,6 +147,57 @@ ANCHOR_PARKS = {
 }
 
 
+# Real dataset names sometimes abbreviate/prefix a word the anchor list
+# spells out differently (e.g. "Mt. Prospect Park" instead of "Mount
+# Prospect Park"; "Msgr. McGolrick Park" instead of "McGolrick Park").
+# Add the REAL dataset's exact name here as an alias whenever a mismatch
+# like this is found, rather than loosening the match check below.
+ANCHOR_ALIASES = {
+    "Mount Prospect Park": ["Mt. Prospect Park", "Mt Prospect Park"],
+    "McGolrick Park": ["Msgr. McGolrick Park", "Msgr McGolrick Park", "Monsignor McGolrick Park"],
+}
+
+
+def _matches_anchor(feature_name, anchor_name):
+    """True if feature_name IS anchor_name (or one of its aliases), or is
+    that name plus a sub-parcel suffix (e.g. "Prospect Park - Long Meadow"
+    matching anchor "Prospect Park").
+
+    HISTORY / BUG THIS REPLACES: an earlier version used a bidirectional
+    substring check (`anchor in name OR name in anchor`). That second
+    direction is a real-world data trap: the live NYC Parks Properties
+    dataset has ~35 unrelated, unnamed features (tiny medians, triangles,
+    strips) whose `name`/`signname` field is literally the generic string
+    "Park" -- and "PARK" is a substring of every one of our anchor names
+    ("... Park"), so all 35 of them silently matched EVERY anchor. Their
+    boundary points got merged into e.g. McCarren Park's point list, and
+    since distance_to_park_boundary_m() takes the closest point across the
+    whole merged list, "distance to McCarren Park" was actually being
+    computed as "distance to whichever of these 35 scattered generic strips
+    happens to be closest" -- explaining a real run where Clinton Hill
+    (miles from McCarren) came back as 1,324.7m: a random median strip
+    somewhere between the two was < the true 3.1km straight-line distance
+    to McCarren itself. Anchor-name-as-suffix (e.g. real name has an extra
+    prefix like "Msgr.") is handled via the explicit ANCHOR_ALIASES table
+    above instead of a generic suffix-match rule, because a generic suffix
+    rule has the exact same trap in reverse (e.g. "Mount Prospect Park"
+    ends with "Prospect Park" and would wrongly match that anchor too).
+
+    NOTE: this used to live in build_geo.py, but check_anchor_coverage()
+    below needs the exact same match rule (it had its own separate, buggy
+    bidirectional-substring copy that this replaces) -- so this is now the
+    single source of truth here in load_parks.py, and build_geo.py imports
+    it from here instead of the reverse.
+    """
+    n = feature_name.strip().upper()
+    candidates = [anchor_name] + ANCHOR_ALIASES.get(anchor_name, [])
+    for c in candidates:
+        cu = c.strip().upper()
+        if n == cu or n.startswith(cu + " ") or n.startswith(cu + "-") or n.startswith(cu + "/"):
+            return True
+    return False
+
+
 def load_neighborhood_bbox(path=NEIGHBORHOODS_PATH, buffer_deg=0.0145):
     """~1 mile buffer in degrees at Brooklyn's latitude (1 mi ~= 0.0145 deg lat,
     slightly more in lon at this latitude; we use one conservative buffer
@@ -284,13 +335,14 @@ def build_placeholder_geojson():
 
 def check_anchor_coverage(gj):
     """Print which of the anchor parks (WP2's brief) were actually found in
-    the fetched features, by loose case-insensitive substring match against
+    the fetched features, by exact-or-prefix-or-alias match (_matches_anchor,
+    the same rule build_geo.py's load_parks() uses to filter features) against
     signname/name311, vs. which are missing -- and whether a miss was
     EXPECTED (non-DPR jurisdiction) or a genuine gap worth investigating."""
-    names = [f["properties"]["name"].upper() for f in gj["features"] if f["properties"].get("name")]
+    names = [f["properties"]["name"] for f in gj["features"] if f["properties"].get("name")]
     print("\nAnchor-park coverage check:")
     for anchor, info in ANCHOR_PARKS.items():
-        hit = any(anchor.upper() in n or n in anchor.upper() for n in names)
+        hit = any(_matches_anchor(n, anchor) for n in names)
         status = "FOUND" if hit else ("expected absent (non-DPR)" if not info["expect_in_dataset"] else "MISSING -- unexpected")
         print(f"  [{('x' if hit else ' ')}] {anchor:32s} {status}")
 
