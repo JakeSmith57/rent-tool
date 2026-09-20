@@ -213,6 +213,18 @@ def load_stab_unit_counts(conn) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["bbl", "stab_units_by_year", "stab_units_ever_nonzero", "stab_units_latest_year"])
 
+    # Brooklyn-only, mirroring load_historical_trend()'s filter. The nycdb
+    # rentstab/rentstab_v2 CSVs are CITYWIDE; the DHCR parse and PLUTO are
+    # already Brooklyn-scoped, so without this filter ~33k Manhattan/Queens/
+    # Bronx/SI BBLs enter the registry union through this path alone, and
+    # every one of them scores `moderate` (rentstab counts, no DHCR/HPD
+    # data). Latent since this function was written -- it could not surface
+    # while the upstream melt silently produced zero rows. See
+    # load_rentstab.py's "REAL SCHEMA" note.
+    before = len(df)
+    df = df[df["bbl"].astype(str).str.startswith("3")]
+    print(f"rentstab_unit_counts: {before} citywide rows -> {len(df)} Brooklyn-boro rows (bbl starts with '3')")
+
     df["year"] = pd.to_numeric(df["year"], errors="coerce")
     df["unit_count"] = pd.to_numeric(df["unit_count"], errors="coerce")
     records = []

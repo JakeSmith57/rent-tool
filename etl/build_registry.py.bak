@@ -76,6 +76,16 @@ output on bbl (never on address) before writing dhcr_brooklyn_parsed.csv;
 this script re-asserts that guarantee defensively (see `dedup proof` below)
 so a future change to the upstream parser, or a differently-shaped real PDF
 extract, cannot silently reintroduce address-keyed duplicate BBL rows here.
+
+BOOLEAN COERCION (2026-09-20 fix): flags that arrive from sqlite/CSV as
+STRINGS are now parsed with _truthy_series() instead of pandas'
+.astype(bool). `"0"` is a non-empty Python string, so `.astype(bool)`
+returns True for it -- which made is_condo_coop True for every PLUTO row
+whose flag came back as a string, and is_condo_coop=True disqualifies the
+pre-1974/6+-unit fallback in compute_stabilization_confidence(), silently
+suppressing every "low"-tier result. The DHCR half of that same expression
+was already doing this correctly with .isin([...]); both halves now share
+one helper.
 """
 from __future__ import annotations
 
@@ -91,6 +101,27 @@ from common import DATA_INTERIM, DATA_PROCESSED, STARTING_ZIPS, get_connection  
 DHCR_PARSED_CSV = DATA_INTERIM / "dhcr_brooklyn_parsed.csv"
 OUT_CSV = DATA_PROCESSED / "registry.csv"
 OUT_TABLE = "registry"
+
+# Values that mean "true" when a 0/1 flag has been round-tripped through
+# sqlite, a CSV, or pandas' object dtype. Anything else (including "0",
+# "", "nan", "None", "false") is false.
+_TRUTHY_STRINGS = {"1", "1.0", "true", "t", "yes", "y"}
+
+
+def _truthy_series(s: pd.Series) -> pd.Series:
+    """Coerce a possibly-string, possibly-null 0/1 flag column to real bools.
+
+    NEVER use .astype(bool) for this: the string "0" is truthy in Python,
+    so .astype(bool) turns a whole column of "0"s into True. See the module
+    docstring's "BOOLEAN COERCION" note.
+    """
+    if s is None:
+        return pd.Series(dtype=bool)
+    # Genuine numeric/bool dtypes can be compared directly; only object/
+    # string columns need the string-set test.
+    if pd.api.types.is_bool_dtype(s) or pd.api.types.is_numeric_dtype(s):
+        return s.fillna(0).astype(float) != 0
+    return s.astype(str).str.strip().str.lower().isin(_TRUTHY_STRINGS)
 
 
 def load_dhcr_current(conn) -> pd.DataFrame:
@@ -125,7 +156,7 @@ def load_dhcr_current(conn) -> pd.DataFrame:
                 "street_name": "first",
                 "street_suffix": "first",
                 "multiple_dwelling_class": lambda s: next((v for v in s if pd.notna(v)), None),
-                "is_condo_coop": lambda s: str(int(any(str(v) == "1" for v in s))),
+                "is_condo_coop": lambda s: str(int(any(str(v).strip().lower() in _TRUTHY_STRINGS for v in s))),
                 "abatement_type": lambda s: ",".join(
                     sorted({t for v in s if pd.notna(v) and v for t in str(v).split(",")})
                 )
@@ -491,9 +522,18 @@ def main() -> None:
     if "multiple_dwelling_class" in reg.columns:
         reg["building_class"] = reg["building_class"].fillna(reg["multiple_dwelling_class"])
 
-    is_condo_pluto = reg["is_condo_coop_pluto"] if "is_condo_coop_pluto" in reg.columns else pd.Series(False, index=reg.index)
-    is_condo_dhcr = reg["is_condo_coop"].fillna("0").astype(str).isin(["1", "True", "true"])
-    reg["is_condo_coop"] = (is_condo_pluto.fillna(False).astype(bool) | is_condo_dhcr).astype(int)
+    # Both halves go through _truthy_series() -- see the module docstring's
+    # "BOOLEAN COERCION" note for why .astype(bool) was wrong here.
+    is_condo_pluto = (
+        _truthy_series(reg["is_condo_coop_pluto"])
+        if "is_condo_coop_pluto" in reg.columns
+        else pd.Series(False, index=reg.index)
+    )
+    is_condo_dhcr = _truthy_series(reg["is_condo_coop"])
+    reg["is_condo_coop"] = (
+        is_condo_pluto.reindex(reg.index).fillna(False)
+        | is_condo_dhcr.reindex(reg.index).fillna(False)
+    ).astype(int)
 
     reg["abatement_end_year"] = pd.NA  # no exemption-end-date source available this run
 
@@ -556,6 +596,9 @@ def main() -> None:
 
     print(f"\nwrote {len(final)} rows to {OUT_CSV} and table '{OUT_TABLE}' in registry.db")
     print(f"on_dhcr_list=1 rows: {int(final['on_dhcr_list'].sum())}")
+    print(f"is_condo_coop=1 rows: {int(final['is_condo_coop'].sum())} of {len(final)} "
+          "(a value equal to the row count almost certainly means a boolean-coercion "
+          "regression -- see the module docstring's BOOLEAN COERCION note)")
     print(f"rows with non-null year_built/unit_count/building_class from PLUTO: "
           f"{final['year_built'].notna().sum()} / {final['unit_count'].notna().sum()} / "
           f"{final['building_class'].notna().sum()}")
