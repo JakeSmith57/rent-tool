@@ -62,16 +62,43 @@ RENTSTAB_LOCAL = DATA_RAW / "rentstab_joined.csv"
 RENTSTAB_V2_LOCAL = DATA_RAW / "rentstab_v2_counts_2024.csv"
 MIRROR_DIR = DATA_EXTERNAL / "dhcr_historical_mirror"
 
-UC_YEAR_COL_RE = re.compile(r"^uc(\d{4})$", re.IGNORECASE)
+# The two nycdb vintages disagree on column naming, confirmed by direct
+# inspection of the real files' headers:
+#   rentstab_joined.csv (2007-2017):        "2007uc" .. "2017uc"  (year FIRST)
+#   rentstab_v2_counts_2024.csv (2018-2024): "uc2018" .. "uc2024"  (uc FIRST)
+# Match both orders. The alternation means the year lands in group 1 or
+# group 2 depending on which form matched -- see _uc_year() below.
+# Deliberately anchored so sibling columns in the v1 file that share the
+# year prefix ("2007est", "2007dhcr", "2007abat") are NOT picked up.
+UC_YEAR_COL_RE = re.compile(r"^(?:uc(\d{4})|(\d{4})uc)$", re.IGNORECASE)
+
+# Both real files key on "ucbbl", not "bbl". Try the known names first,
+# then fall back to any column ending in "bbl" so a future vintage that
+# renames it again still joins instead of silently melting to nothing.
+BBL_COL_CANDIDATES = ("bbl", "ucbbl")
+
+
+def _uc_year(match: re.Match) -> str:
+    """Return the 4-digit year from whichever alternation branch matched."""
+    return match.group(1) or match.group(2)
+
+
+def _find_bbl_col(df: pd.DataFrame) -> str | None:
+    lower = {c.lower(): c for c in df.columns}
+    for cand in BBL_COL_CANDIDATES:
+        if cand in lower:
+            return lower[cand]
+    return next((c for c in df.columns if c.lower().endswith("bbl")), None)
 
 
 def _melt_unit_counts(df: pd.DataFrame) -> pd.DataFrame:
     """Reshape a wide rentstab-style frame (one uc20XX column per year) into
     long (bbl, year, unit_count) rows, one per BBL x year with a non-null
-    count. Column names are matched case-insensitively against `ucNNNN`
-    (nycdb's own naming for both `rentstab` (uc2007..uc2017) and
-    `rentstab_v2` (uc2018..uc2024) -- see module docstring for sources).
-    A BBL column is required; it is normalized (whitespace stripped, a
+    count. Column names are matched case-insensitively against BOTH of
+    nycdb's year-column spellings -- `NNNNuc` (rentstab: 2007uc..2017uc)
+    and `ucNNNN` (rentstab_v2: uc2018..uc2024) -- which differ between the
+    two real files; see module docstring for sources. The BBL column is
+    found by _find_bbl_col() ("bbl"/"ucbbl", else any *bbl column); it is normalized (whitespace stripped, a
     trailing ".0" float-string artifact stripped, left-padded to 10 digits
     when the result is all-digits and shorter than that) so it matches
     make_bbl()'s own 10-digit boro+block+lot format. Rows with no derivable
@@ -79,15 +106,17 @@ def _melt_unit_counts(df: pd.DataFrame) -> pd.DataFrame:
     (bbl, year) rows within this frame are collapsed by taking the MAX
     unit_count, not an arbitrary pick.
     """
-    if "bbl" not in df.columns:
-        # nycdb's real CSVs use lowercase "bbl"; be tolerant of case drift.
-        bbl_col = next((c for c in df.columns if c.lower() == "bbl"), None)
-        if bbl_col is None:
-            print("[warn] no bbl column found in rentstab-style frame -- skipping unit-count melt.")
-            return pd.DataFrame(columns=["bbl", "year", "unit_count"])
+    bbl_col = _find_bbl_col(df)
+    if bbl_col is None:
+        print(
+            "[warn] no bbl/ucbbl column found in rentstab-style frame "
+            f"(columns seen: {list(df.columns)[:8]}...) -- skipping unit-count melt."
+        )
+        return pd.DataFrame(columns=["bbl", "year", "unit_count"])
+    if bbl_col != "bbl":
         df = df.rename(columns={bbl_col: "bbl"})
 
-    year_cols = {c: m.group(1) for c in df.columns if (m := UC_YEAR_COL_RE.match(c))}
+    year_cols = {c: _uc_year(m) for c in df.columns if (m := UC_YEAR_COL_RE.match(c))}
     if not year_cols:
         print("[warn] no ucNNNN year columns found in rentstab-style frame -- skipping unit-count melt.")
         return pd.DataFrame(columns=["bbl", "year", "unit_count"])
